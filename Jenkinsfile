@@ -2,81 +2,68 @@ pipeline {
     agent any
 
     environment {
+        // 우리 프라이빗 서버 정보
         EC2_USER = "ubuntu"
-        EC2_KEY  = "/var/jenkins_home/.ssh/id_rsa"
+        EC2_HOST = "10.0.2.61"
+        EC2_KEY  = "/var/jenkins_home/.ssh/id_rsa" // 젠킨스 컨테이너 안의 키 경로
 
         APP_DIR  = "/home/ubuntu/app"
+        // 빌드 후 생성되는 실제 파일명 (아까 확인한 이름)
         APP_NAME = "jenkins_test-0.0.1-SNAPSHOT.jar"
-        APP_PORT = "9090"
-
-        //  순차 배포 대상 서버
-        SERVERS  = "3.34.138.214 43.203.209.251"
+        APP_PORT = "8080"
     }
 
     stages {
-
         stage('Git Checkout') {
             steps {
-                git url: 'https://github.com/ehrbs56/myapp.git', branch: 'main'
+                // 내 깃허브 주소로 변경
+                git url: 'https://github.com/ehrbs56/myapp1.git', branch: 'main'
             }
         }
 
         stage('Build') {
             steps {
                 sh '''
-chmod +x ./gradlew
-./gradlew clean bootJar -x test
-'''
+                chmod +x ./gradlew
+                ./gradlew clean bootJar -x test
+                '''
             }
         }
 
-        stage('Rolling Deploy') {
+        stage('Deploy & Run on EC2') {
             steps {
-                script {
-                    def serverList = SERVERS.split()
+                sh """
+                echo "🚀 Deploy start"
 
-                    for (int i = 0; i < serverList.size(); i++) {
-                        def server = serverList[i]
+                # 1. JAR 파일 프라이빗 서버로 전송 (SCP 사용)
+                scp -i ${EC2_KEY} -o StrictHostKeyChecking=no \
+                build/libs/${APP_NAME} \
+                ${EC2_USER}@${EC2_HOST}:${APP_DIR}/${APP_NAME}
 
-                        echo " Deploying to ${server}"
+                # 2. 서버에서 기존 프로세스 종료 후 재실행
+                ssh -i ${EC2_KEY} -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} << EOF
 
-                        // 1️ JAR 전송
-                        sh """
-scp -i ${EC2_KEY} -o StrictHostKeyChecking=no \
-build/libs/${APP_NAME} \
-${EC2_USER}@${server}:${APP_DIR}/${APP_NAME}
-"""
+                # 기존에 실행 중인 자바 프로세스 종료
+                pgrep -f ${APP_NAME} | xargs kill -15 || true
 
-                        // 2️⃣ 서버 재기동
-                        sh """
-ssh -i ${EC2_KEY} -o StrictHostKeyChecking=no ${EC2_USER}@${server} << EOF
-pkill -f ${APP_NAME} || true
-echo "Starting new version on ${server}"
+                echo "Starting new version..."
 
-nohup java -jar ${APP_DIR}/${APP_NAME} \\
-  --server.address=0.0.0.0 \\
-  --server.port=${APP_PORT} \\
-  > ${APP_DIR}/app.log 2>&1 &
+                # 백그라운드 실행
+                nohup java -jar ${APP_DIR}/${APP_NAME} > ${APP_DIR}/app.log 2>&1 &
+
+                echo "Deployment complete!"
 EOF
-"""
-
-                        // 3️⃣ 다음 서버로 넘어가기 전 대기 (무중단 핵심)
-                        if (i < serverList.size() - 1) {
-                            echo " Waiting before deploying next server..."
-                            sleep(time: 30, unit: 'SECONDS')
-                        }
-                    }
-                }
+                """
             }
         }
     }
 
     post {
         success {
-            echo " Rolling deployment completed successfully"
+            echo "✅ Deployment completed!"
         }
         failure {
-            echo " Deployment failed"
+            echo "❌ Deployment failed"
         }
     }
 }
